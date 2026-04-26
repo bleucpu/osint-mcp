@@ -107,9 +107,24 @@ ANTHROPIC_API_KEY          # feed_summary endpoint (Phase 3)
 **Feed**
 - `feed_recent(target?, kind?, since?, limit?)` — raw events, time-windowed
 - `feed_search(query, target?, since?)` — FTS5 keyword search
+- `feed_summary(target?, kind?, hours_ago?)` — compact digest; uses Anthropic API if `ANTHROPIC_API_KEY` is set, otherwise a deterministic group-by summary
+
+## Bug bounty platform integrations
+
+**Hard rule:** we use only the official APIs for HackerOne, Bugcrowd, and any
+similar platform. No scraping, no browser impersonation, no TLS-fingerprint
+bypasses. Getting your researcher account banned for ToS violation is not
+worth any amount of scope-diff signal. If you don't have an API token for a
+platform, the corresponding watcher is simply disabled — it will appear in
+`target_health_check` with `disabled: true` and a hint to set the env var.
+
+| Platform   | Required env vars                                   |
+|------------|-----------------------------------------------------|
+| HackerOne  | `HACKERONE_API_USERNAME` + `HACKERONE_API_TOKEN`    |
+| Bugcrowd   | `BUGCROWD_API_TOKEN`                                |
 
 ## Status
 
 - [x] Phase 1: schema, Discord router, target tools, RSS watcher, BBOT watcher, MCP server
-- [ ] Phase 2: H1/Bugcrowd scope diff, certstream, JS bundle watcher, feed_summary
-- [ ] Phase 3: Twitter, secrets watcher, semantic search, auto-trigger downstream tasks
+- [x] Phase 2: H1/Bugcrowd scope-diff (official API only), certstream live watcher, feed_summary, first-ingestion Discord suppression
+- [ ] Phase 3: JS bundle hash watcher, GitHub secrets watcher (TruffleHog/NoseyParker), Twitter, semantic search, auto-trigger downstream tasks

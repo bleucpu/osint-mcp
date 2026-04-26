@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -9,10 +10,12 @@ from typing import Any
 from .config import Config
 from .db import Database
 from .discord import DiscordRouter, deliver_pending
-from .events import KIND_NEWS, KIND_RECON
+from .events import KIND_NEWS, KIND_RECON, KIND_SCOPE
 from .targets import list_targets
 from .watchers.bbot import BbotWatcher
+from .watchers.certstream import run_certstream
 from .watchers.rss import RssWatcher
+from .watchers.scope import BugcrowdScopeWatcher, HackerOneScopeWatcher
 
 log = logging.getLogger("osint.daemon")
 
@@ -61,6 +64,10 @@ class Daemon:
         log.info("starting daemon")
         self._tasks.append(asyncio.create_task(self._scheduler_loop()))
         self._tasks.append(asyncio.create_task(self._delivery_loop()))
+        if os.environ.get("CERTSTREAM_DISABLED", "").lower() not in ("1", "true", "yes"):
+            self._tasks.append(asyncio.create_task(
+                run_certstream(self.db, self._stop)
+            ))
 
     async def stop(self) -> None:
         log.info("stopping daemon")
@@ -180,4 +187,12 @@ class Daemon:
                     preset=target.get("bbot_preset") or self.cfg.bbot.preset,
                     output_dir=self.cfg.bbot.output_dir,
                 ))
+        if kind_filter is None or kind_filter == KIND_SCOPE:
+            bb = target.get("bug_bounty") or {}
+            platform = (bb.get("platform") or "").lower()
+            slug = bb.get("slug")
+            if slug and platform == "hackerone":
+                out.append(HackerOneScopeWatcher(target["name"], slug))
+            elif slug and platform == "bugcrowd":
+                out.append(BugcrowdScopeWatcher(target["name"], slug))
         return out

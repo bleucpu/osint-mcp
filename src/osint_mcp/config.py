@@ -49,7 +49,9 @@ class Config:
     discord: DiscordConfig = field(default_factory=DiscordConfig)
     verify_on_add: bool = True
 
+    hackerone_username: str | None = None
     hackerone_token: str | None = None
+    bugcrowd_token: str | None = None
     github_token: str | None = None
     twitterapi_io_key: str | None = None
     anthropic_api_key: str | None = None
@@ -96,7 +98,9 @@ def load_config(path: str | os.PathLike | None = None) -> Config:
         if val:
             cfg.discord.kind_webhooks[kind] = val
 
+    cfg.hackerone_username = os.environ.get("HACKERONE_API_USERNAME")
     cfg.hackerone_token = os.environ.get("HACKERONE_API_TOKEN")
+    cfg.bugcrowd_token = os.environ.get("BUGCROWD_API_TOKEN")
     cfg.github_token = os.environ.get("GITHUB_TOKEN")
     cfg.twitterapi_io_key = os.environ.get("TWITTERAPI_IO_KEY")
     cfg.anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")

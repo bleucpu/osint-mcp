@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..db import Database, now_iso
-from ..events import Event, ingest
+from ..events import Event, ingest, max_event_id, suppress_range
 
 log = logging.getLogger("osint.watchers")
 
@@ -38,6 +38,10 @@ class Watcher(ABC):
         ...
 
     async def execute(self, db: Database) -> WatcherResult:
+        first_run = await _is_first_run(db, self.id)
+        max_id_before = await max_event_id(db) if first_run else 0
+        self._emit_sources: set[str] = set()
+
         await update_watcher_state(db, self, started=True)
         try:
             result = await self.run(db)
@@ -45,11 +49,32 @@ class Watcher(ABC):
             log.exception("watcher %s failed", self.id)
             await update_watcher_state(db, self, error=str(e))
             return WatcherResult(errors=[str(e)])
+
+        if first_run and result.new_events > 0 and self._emit_sources:
+            suppressed = 0
+            for src in self._emit_sources:
+                suppressed += await suppress_range(db, src, max_id_before)
+            log.info(
+                "watcher %s first run: suppressed %d backfill events from Discord",
+                self.id, suppressed,
+            )
+            result.metadata["suppressed_backfill"] = suppressed
+
         await update_watcher_state(db, self, success=True, metadata=result.metadata)
         return result
 
     async def emit(self, db: Database, event: Event) -> bool:
+        if not hasattr(self, "_emit_sources"):
+            self._emit_sources = set()
+        self._emit_sources.add(event.source)
         return await ingest(db, event)
+
+
+async def _is_first_run(db: Database, watcher_id: str) -> bool:
+    row = await db.fetchone(
+        "SELECT last_success FROM watcher_state WHERE id = ?", (watcher_id,)
+    )
+    return row is None or row["last_success"] is None
 
 
 async def update_watcher_state(

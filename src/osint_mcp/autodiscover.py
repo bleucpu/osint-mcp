@@ -13,8 +13,7 @@ from bs4 import BeautifulSoup
 log = logging.getLogger("osint.autodiscover")
 
 USER_AGENT = (
-    "Mozilla/5.0 (osint-mcp/0.1; +https://github.com/bleucpu/osint-mcp) "
-    "Python-httpx"
+    "osint-mcp/0.1 (+https://github.com/bleucpu/osint-mcp; bug bounty research)"
 )
 
 COMMON_TLDS = ["com", "io", "ai", "co", "org", "net", "dev", "app"]
@@ -102,10 +101,14 @@ async def autodiscover(name_or_domain: str) -> Discovery:
         for domain in list(d.candidate_root_domains):
             await _enrich_from_homepage(client, domain, d)
 
-        await asyncio.gather(
-            _check_hackerone(client, name_or_domain, d),
-            _check_bugcrowd(client, name_or_domain, d),
-            return_exceptions=True,
+        # NOTE: We deliberately DO NOT probe hackerone.com / bugcrowd.com to
+        # detect program existence. Anything against those platforms must go
+        # through their official APIs — see watchers/scope.py and the
+        # platform-tos memory. The AI can web-search for the program slug
+        # and pass it explicitly to target_add(bug_bounty=...).
+        d.notes.append(
+            "platform program detection skipped — pass bug_bounty={'platform':..,'slug':..} "
+            "to target_add manually; uses official API only when watcher runs"
         )
 
         if d.candidate_root_domains:
@@ -202,40 +205,6 @@ def _parse_html(html: str, base_url: str, d: Discovery) -> None:
         host = urlparse(href).hostname or ""
         if d.status_page is None and any(p in host for p in STATUS_PATTERNS):
             d.status_page = href.split("?")[0].rstrip("/")
-
-
-async def _check_hackerone(client: httpx.AsyncClient, name: str, d: Discovery) -> None:
-    for slug in _slug_variants(name):
-        url = f"https://hackerone.com/{slug}"
-        try:
-            r = await client.get(url)
-        except httpx.HTTPError:
-            continue
-        if r.status_code == 200 and "<title>" in r.text.lower():
-            title = re.search(r"<title>(.*?)</title>", r.text, re.IGNORECASE | re.DOTALL)
-            t = title.group(1).strip() if title else slug
-            if "page not found" in t.lower() or "404" in t:
-                continue
-            entry = {"platform": "hackerone", "slug": slug, "title": t}
-            if entry not in d.bug_bounty_programs:
-                d.bug_bounty_programs.append(entry)
-            return
-
-
-async def _check_bugcrowd(client: httpx.AsyncClient, name: str, d: Discovery) -> None:
-    for slug in _slug_variants(name):
-        url = f"https://bugcrowd.com/{slug}"
-        try:
-            r = await client.get(url)
-        except httpx.HTTPError:
-            continue
-        if r.status_code == 200 and "Bugcrowd" in r.text:
-            if "Page Not Found" in r.text or "404" in r.text[:500]:
-                continue
-            entry = {"platform": "bugcrowd", "slug": slug}
-            if entry not in d.bug_bounty_programs:
-                d.bug_bounty_programs.append(entry)
-            return
 
 
 async def _crtsh_count(client: httpx.AsyncClient, domain: str) -> int:

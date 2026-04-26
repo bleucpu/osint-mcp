@@ -11,6 +11,7 @@ from .config import Config
 from .daemon import Daemon
 from .db import Database
 from .events import ALL_KINDS, fetch_recent, fetch_search
+from .summarize import heuristic_summary, llm_summary
 from .targets import (
     TargetExists,
     TargetNotFound,
@@ -169,6 +170,38 @@ def build_server(cfg: Config, db: Database, daemon: Daemon) -> FastMCP:
             since = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
         events = await fetch_search(db, query, target=target, since=since, limit=limit)
         return {"count": len(events), "events": events}
+
+    @mcp.tool()
+    async def feed_summary(
+        target: str | None = None,
+        kind: str | None = None,
+        hours_ago: int = 24,
+        limit: int = 200,
+        use_llm: bool = True,
+    ) -> dict:
+        """
+        Compact digest of recent events. If ANTHROPIC_API_KEY is set and
+        use_llm=True, an LLM picks the highest-leverage threads to investigate
+        first; otherwise a deterministic group-by-target/kind summary is
+        returned. The summary is meant to be cheap context for an AI hacker
+        deciding where to dig.
+        """
+        since = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
+        events = await fetch_recent(db, target=target, kind=kind, since=since, limit=limit)
+        used_llm = False
+        if use_llm and cfg.anthropic_api_key:
+            text = await llm_summary(events, cfg.anthropic_api_key)
+            used_llm = True
+        else:
+            text = heuristic_summary(events)
+        return {
+            "summary": text,
+            "event_count": len(events),
+            "window_hours": hours_ago,
+            "target_filter": target,
+            "kind_filter": kind,
+            "used_llm": used_llm,
+        }
 
     @mcp.tool()
     async def system_status() -> dict:

@@ -137,6 +137,22 @@ async def mark_delivered(db: Database, event_ids: list[int]) -> None:
     )
 
 
+async def max_event_id(db: Database) -> int:
+    row = await db.fetchone("SELECT COALESCE(MAX(id), 0) AS m FROM events")
+    return row["m"] if row else 0
+
+
+async def suppress_range(db: Database, source: str, after_id: int) -> int:
+    """Mark all events with the given source and id > after_id as already
+    delivered. Used for first-ingestion suppression so a new target doesn't
+    flood Discord with backfill."""
+    cur = await db.execute(
+        "UPDATE events SET delivered = 1 WHERE source = ? AND id > ? AND delivered = 0",
+        (source, after_id),
+    )
+    return cur.rowcount
+
+
 def _row_to_dict(row) -> dict[str, Any]:
     payload = {}
     try:
