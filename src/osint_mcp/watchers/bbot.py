@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -38,9 +40,9 @@ class BbotWatcher(Watcher):
 
     async def run(self, db: Database) -> WatcherResult:
         result = WatcherResult()
-        bbot_bin = shutil.which("bbot")
+        bbot_bin = _find_bbot()
         if not bbot_bin:
-            msg = "bbot binary not found on PATH; install with `pip install bbot`"
+            msg = "bbot binary not found; install with `pip install bbot`"
             log.warning(msg)
             result.errors.append(msg)
             return result
@@ -103,6 +105,20 @@ class BbotWatcher(Watcher):
             "scan_dir": str(scan_dir),
         }
         return result
+
+
+def _find_bbot() -> str | None:
+    """Locate bbot binary. Checks PATH first, then alongside the current
+    Python interpreter (so unactivated venvs work too)."""
+    p = shutil.which("bbot")
+    if p:
+        return p
+    bin_dir = Path(sys.executable).parent
+    for candidate in ("bbot.exe", "bbot"):
+        cand = bin_dir / candidate
+        if cand.is_file():
+            return str(cand)
+    return None
 
 
 def _read_ndjson(path: Path):

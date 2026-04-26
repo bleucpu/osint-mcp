@@ -4,6 +4,9 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from .config import load_config
 from .daemon import Daemon
@@ -21,9 +24,28 @@ def _setup_logging() -> None:
     )
 
 
+def _load_env_file() -> Path | None:
+    """Search CWD then this package's parent for a .env file. First wins."""
+    candidates = [
+        Path.cwd() / ".env",
+        Path(__file__).resolve().parent.parent.parent / ".env",
+    ]
+    for p in candidates:
+        if p.is_file():
+            load_dotenv(p, override=False)
+            return p
+    return None
+
+
 async def _async_main() -> None:
     _setup_logging()
     log = logging.getLogger("osint.main")
+
+    env_path = _load_env_file()
+    if env_path:
+        log.info("loaded env from %s", env_path)
+    else:
+        log.info("no .env found, using process environment only")
 
     cfg = load_config()
     db = Database(cfg.db_path)
