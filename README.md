@@ -1,0 +1,115 @@
+# osint-mcp
+
+Continuous OSINT / attack-surface monitoring stack for bug bounty hunting.
+
+One Python daemon, one SQLite database, many watchers (subdomains, RSS, changelogs, certs, GitHub, scope changes, social), exposed as an **MCP server** so AI agents can pull fresh attack surface on any target — and pushed in real time to **Discord** so you see it too.
+
+## Why
+
+Every bounty hunter runs the same recon cron job: subfinder + httpx + nuclei, daily, on the same targets. By the time a new subdomain lands in CT logs, fifty hunters already saw it.
+
+The edge in 2026 is **breadth of signal**. New subdomains are one of five things worth watching:
+
+1. New asset (subdomains, ports, certs, cloud)
+2. Changed asset (JS bundle hash, headers, tech)
+3. New code (commits, leaked secrets, "oops" force pushes)
+4. New product/feature (blog, changelog, GitHub release, status page, tweet)
+5. New scope (HackerOne / Bugcrowd program changes, payout bumps)
+
+This system watches all five, normalizes them into a single event stream, and lets an AI hacker decide what's interesting — instead of pre-filtering with static heuristics that go stale.
+
+## Architecture
+
+```
+┌──────────── watcher daemon ────────────┐
+│  assets   code     news     social     │
+│  ──────   ────     ────     ──────     │
+│  BBOT     Truffle  RSS      twitter    │
+│  CT logs  NoseyP   H1 API   GH events  │
+│  httpx    git-oops status              │
+│       │     │       │       │          │
+│       └─────┴───┬───┴───────┘          │
+│                 ▼                      │
+│      normalize → dedupe → score        │
+│                 │                      │
+│         SQLite (FTS5)                  │
+│                 │                      │
+│     ┌───────────┴───────────┐          │
+│     ▼                       ▼          │
+│ Discord webhook       MCP server       │
+└────────────────────────────────────────┘
+```
+
+One process. Stdio MCP server + asyncio daemon tasks. Daemon lives as long as the MCP server is connected; on restart it catches up any cadences it missed.
+
+## Quickstart
+
+```bash
+pip install -e .
+# optionally install BBOT for the subdomain watcher
+pip install -e ".[bbot]"
+
+cp osint.example.yaml osint.yaml
+# at minimum set DISCORD_WEBHOOK_FIREHOSE in your env
+export DISCORD_WEBHOOK_FIREHOSE="https://discord.com/api/webhooks/..."
+
+osint-mcp
+```
+
+Then in your MCP client (Claude Code, Cursor, etc.) point at `osint-mcp` over stdio.
+
+Add a target:
+```
+target_autodiscover("HuggingFace")    → see what we can find automatically
+target_add("HuggingFace")              → commit to watchlist
+feed_recent(target="HuggingFace")      → query events
+```
+
+## Discord routing
+
+One required env var:
+```
+DISCORD_WEBHOOK_FIREHOSE   # everything goes here unless overridden
+```
+
+Optional per-kind overrides. Set any subset; missing kinds fall back to firehose:
+```
+DISCORD_WEBHOOK_RECON       # new subdomains, ports, certs
+DISCORD_WEBHOOK_NEWS        # blog posts, changelogs, GH releases
+DISCORD_WEBHOOK_SCOPE       # H1/Bugcrowd program changes
+DISCORD_WEBHOOK_SECRETS     # leaked keys
+DISCORD_WEBHOOK_JS          # JS bundle changes / new endpoints
+DISCORD_WEBHOOK_SOCIAL      # twitter
+```
+
+## Optional API keys
+
+All optional — the system runs without them, just with reduced signal.
+```
+HACKERONE_API_TOKEN        # scope-diff watcher (Phase 2)
+GITHUB_TOKEN               # higher rate limits + private secret scan (Phase 2)
+TWITTERAPI_IO_KEY          # twitter watcher (Phase 3)
+ANTHROPIC_API_KEY          # feed_summary endpoint (Phase 3)
+```
+
+## MCP tools
+
+**Targets**
+- `target_autodiscover(name_or_domain)` — read-only, returns everything we can find about a target
+- `target_add(name, ...)` — commit to watchlist (auto-discovers if no fields given)
+- `target_update(name, patch)` — fix/extend
+- `target_remove(name)`
+- `target_show(name)` — current config + watcher health
+- `target_list()`
+- `target_health(name?)` — which sources are healthy/broken/stale
+- `target_force_scan(name, kind?)` — trigger out-of-cadence scan
+
+**Feed**
+- `feed_recent(target?, kind?, since?, limit?)` — raw events, time-windowed
+- `feed_search(query, target?, since?)` — FTS5 keyword search
+
+## Status
+
+- [x] Phase 1: schema, Discord router, target tools, RSS watcher, BBOT watcher, MCP server
+- [ ] Phase 2: H1/Bugcrowd scope diff, certstream, JS bundle watcher, feed_summary
+- [ ] Phase 3: Twitter, secrets watcher, semantic search, auto-trigger downstream tasks

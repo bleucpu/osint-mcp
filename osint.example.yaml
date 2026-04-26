@@ -1,0 +1,33 @@
+# osint-mcp config — copy to osint.yaml and edit.
+# Most fields have sensible defaults; the only required setup is the
+# DISCORD_WEBHOOK_FIREHOSE env var. You can leave this whole file empty
+# (just `{}`) and the system will run with all defaults.
+
+# Where state lives. Relative paths are relative to the project root.
+data_dir: ./data
+
+# Cadences for each watcher kind (Python timedelta-friendly strings)
+cadences:
+  rss: "15m"
+  bbot: "24h"
+  certstream: "live"        # streaming, no cadence (Phase 2)
+  scope_diff: "1h"          # Phase 2
+  github_events: "1h"       # Phase 2
+  twitter: "30m"            # Phase 3
+  jsdiff: "6h"              # Phase 2
+
+# BBOT default preset. Per-target override goes in the target spec.
+bbot:
+  preset: "subdomain-enum"  # passive-friendly default
+  output_dir: ./scans
+
+# Discord routing. Webhook URLs live in env vars, see README.
+# This block only needs to exist if you want to override defaults.
+discord:
+  enabled: true
+  rate_limit_per_minute: 30   # per-channel, conservative
+  embed_events: true          # use rich embeds vs plain text
+
+# Whether to run an initial autodiscover on every target_add even when
+# the AI provides full config. Cheap sanity check.
+verify_on_add: true

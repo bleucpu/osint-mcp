@@ -1,0 +1,32 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# osint-mcp local state
+data/
+scans/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# editor
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# user config (keep example only)
+osint.yaml
+!osint.example.yaml
+
+# local Claude Code state
+.claude/
