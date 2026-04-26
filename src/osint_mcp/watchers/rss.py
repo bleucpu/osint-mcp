@@ -55,11 +55,14 @@ class RssWatcher(Watcher):
         return result
 
 
+_UA = "osint-mcp/0.1 (+https://github.com/bleucpu/osint-mcp; bug bounty research)"
+
+
 async def _fetch(url: str) -> str:
     async with httpx.AsyncClient(
         timeout=12.0,
         follow_redirects=True,
-        headers={"User-Agent": "osint-mcp-rss/0.1"},
+        headers={"User-Agent": _UA, "Accept": "application/rss+xml, application/atom+xml, application/xml, text/xml, */*"},
     ) as c:
         r = await c.get(url)
         r.raise_for_status()
