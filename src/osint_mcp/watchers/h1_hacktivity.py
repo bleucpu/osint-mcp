@@ -42,6 +42,18 @@ class HackerOneHacktivityWatcher(Watcher):
 
     async def run(self, db: Database) -> WatcherResult:
         result = WatcherResult()
+
+        # Same safety gate as scope.py — zero requests to hackerone.com when
+        # OSINT_HACKERONE_API_ENABLED is not set to 1.
+        from .scope import _platform_api_enabled
+        enabled, reason = _platform_api_enabled("HACKERONE")
+        if not enabled:
+            result.metadata = {
+                "disabled": True, "reason": reason, "slug": self.slug,
+                "safety_gate": "OSINT_HACKERONE_API_ENABLED",
+            }
+            return result
+
         username = os.environ.get("HACKERONE_API_USERNAME")
         token = os.environ.get("HACKERONE_API_TOKEN")
         if not (username and token):

@@ -37,6 +37,27 @@ H1_API_BASE = "https://api.hackerone.com/v1"
 BUGCROWD_API_BASE = "https://api.bugcrowd.com"
 
 
+def _platform_api_enabled(platform: str) -> tuple[bool, str]:
+    """
+    Default-OFF safety gate for bug-bounty-platform API watchers.
+    Set OSINT_HACKERONE_API_ENABLED=1 (or _BUGCROWD_) to opt in. Without
+    this, watchers refuse to make any request to those domains even when
+    tokens are present.
+
+    `platform` is "HACKERONE" or "BUGCROWD".
+    """
+    var = f"OSINT_{platform}_API_ENABLED"
+    val = os.environ.get(var, "").lower()
+    if val in ("1", "true", "yes", "on"):
+        return True, ""
+    return False, (
+        f"{platform} platform-API watcher is OFF BY DEFAULT for ToS safety. "
+        f"Set {var}=1 in your .env to opt in. While off, no requests are "
+        f"made to {platform.lower()}.com regardless of whether API tokens "
+        f"are configured."
+    )
+
+
 class HackerOneScopeWatcher(Watcher):
     """
     Polls the official HackerOne API for a program's structured scopes and
@@ -56,6 +77,17 @@ class HackerOneScopeWatcher(Watcher):
 
     async def run(self, db: Database) -> WatcherResult:
         result = WatcherResult()
+
+        # Safety gate FIRST. When the platform API is disabled, we don't
+        # even read the token — guaranteed zero requests to hackerone.com.
+        enabled, reason = _platform_api_enabled("HACKERONE")
+        if not enabled:
+            result.metadata = {
+                "disabled": True, "reason": reason, "slug": self.slug,
+                "safety_gate": "OSINT_HACKERONE_API_ENABLED",
+            }
+            return result
+
         username = os.environ.get("HACKERONE_API_USERNAME")
         token = os.environ.get("HACKERONE_API_TOKEN")
 
@@ -147,6 +179,15 @@ class BugcrowdScopeWatcher(Watcher):
 
     async def run(self, db: Database) -> WatcherResult:
         result = WatcherResult()
+
+        enabled, reason = _platform_api_enabled("BUGCROWD")
+        if not enabled:
+            result.metadata = {
+                "disabled": True, "reason": reason, "slug": self.slug,
+                "safety_gate": "OSINT_BUGCROWD_API_ENABLED",
+            }
+            return result
+
         token = os.environ.get("BUGCROWD_API_TOKEN")
         if not token:
             result.metadata = {

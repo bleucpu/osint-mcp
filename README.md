@@ -137,12 +137,24 @@ is simply disabled — it will appear in `target_health_check` with
 `disabled: true` and a hint to set the env var. We don't fall back to
 scraping, ever.
 
-## Bug bounty platform required env vars
+## Bug bounty platform watchers (off by default)
 
-| Platform   | Required env vars                                   | Watchers                              |
-|------------|-----------------------------------------------------|----------------------------------------|
-| HackerOne  | `HACKERONE_API_USERNAME` + `HACKERONE_API_TOKEN`    | scope-diff, hacktivity (disclosed reports) |
-| Bugcrowd   | `BUGCROWD_API_TOKEN`                                | scope-diff                            |
+These watchers are **off by default**. When off, the system makes zero
+requests to `api.hackerone.com` or `api.bugcrowd.com`, *regardless of
+whether you've set tokens*. There is no unauthenticated public API on
+either platform, and we never fall back to scraping the web UI — so
+"safer mode" really does mean "we don't talk to those platforms at all."
+
+To opt in, set both the safety flag *and* the credentials:
+
+| Platform   | Safety flag                              | Credentials                                          | Watchers                                   |
+|------------|------------------------------------------|------------------------------------------------------|--------------------------------------------|
+| HackerOne  | `OSINT_HACKERONE_API_ENABLED=1`          | `HACKERONE_API_USERNAME` + `HACKERONE_API_TOKEN`     | scope-diff, hacktivity (disclosed reports) |
+| Bugcrowd   | `OSINT_BUGCROWD_API_ENABLED=1`           | `BUGCROWD_API_TOKEN`                                 | scope-diff                                 |
+
+`system_status.platform_api_safety` reports the current state of both
+flags so you can verify before each session whether the watchers are
+hot or dark.
 
 ## GitHub auth
 

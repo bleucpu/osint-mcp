@@ -447,6 +447,10 @@ def build_server(cfg: Config, db: Database, daemon: Daemon) -> FastMCP:
 
         gh_tok, gh_src = await resolve_github_token()
 
+        import os as _os
+        h1_safety = _os.environ.get("OSINT_HACKERONE_API_ENABLED", "").lower() in ("1","true","yes","on")
+        bc_safety = _os.environ.get("OSINT_BUGCROWD_API_ENABLED", "").lower() in ("1","true","yes","on")
+
         return {
             "data_dir": str(cfg.data_dir),
             "db_path": str(cfg.db_path),
@@ -458,9 +462,25 @@ def build_server(cfg: Config, db: Database, daemon: Daemon) -> FastMCP:
             },
             "cadences": cfg.cadences,
             "bbot_preset": cfg.bbot.preset,
+            "platform_api_safety": {
+                "hackerone_enabled": h1_safety,
+                "bugcrowd_enabled":  bc_safety,
+                "note": (
+                    "Off by default. With these flags off, no requests hit "
+                    "api.hackerone.com or api.bugcrowd.com regardless of "
+                    "tokens. Set OSINT_HACKERONE_API_ENABLED=1 (or _BUGCROWD_) "
+                    "to opt in."
+                ),
+            },
             "optional_keys": {
-                "hackerone": bool(cfg.hackerone_token and cfg.hackerone_username),
-                "bugcrowd": bool(cfg.bugcrowd_token),
+                "hackerone": {
+                    "credentials_set": bool(cfg.hackerone_token and cfg.hackerone_username),
+                    "watcher_enabled": h1_safety,
+                },
+                "bugcrowd": {
+                    "credentials_set": bool(cfg.bugcrowd_token),
+                    "watcher_enabled": bc_safety,
+                },
                 "github": {"available": bool(gh_tok), "source": gh_src},
                 "anthropic": bool(cfg.anthropic_api_key),
             },
