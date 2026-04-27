@@ -14,6 +14,8 @@ from .events import KIND_JS, KIND_NEWS, KIND_RECON, KIND_SCOPE
 from .targets import list_targets
 from .watchers.bbot import BbotWatcher
 from .watchers.certstream import run_certstream
+from .watchers.github_events import GitHubEventsWatcher
+from .watchers.h1_hacktivity import HackerOneHacktivityWatcher
 from .watchers.js import JsBundleWatcher
 from .watchers.rss import RssWatcher
 from .watchers.scope import BugcrowdScopeWatcher, HackerOneScopeWatcher
@@ -77,12 +79,17 @@ class Daemon:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
 
-    async def trigger_target_now(self, name: str, kind: str | None = None) -> dict[str, Any]:
+    async def trigger_target_now(
+        self, name: str, kind: str | None = None,
+        skip_kinds: set[str] | None = None,
+    ) -> dict[str, Any]:
         targets = await list_targets(self.db)
         target = next((t for t in targets if t["name"] == name), None)
         if not target:
             raise ValueError(f"unknown target: {name}")
         watchers = self._build_watchers_for_target(target, kind_filter=kind)
+        if skip_kinds:
+            watchers = [w for w in watchers if w.kind not in skip_kinds]
         results = []
         for w in watchers:
             res = await w.execute(self.db)
@@ -94,6 +101,18 @@ class Daemon:
                 "errors": res.errors,
             })
         return {"target": name, "kind": kind, "watchers": results}
+
+    async def prime_new_target(self, name: str) -> dict[str, Any]:
+        """
+        Fire light-weight watchers immediately for a freshly-added target —
+        RSS / scope / news (H1 hacktivity, github events) / JS — so the
+        target lights up with data right away instead of waiting for the
+        next scheduler tick. BBOT (heavy, daily) is intentionally skipped;
+        run target_force_scan(kind="recon") manually when ready.
+        """
+        return await self.trigger_target_now(
+            name, kind=None, skip_kinds={KIND_RECON},
+        )
 
     async def _scheduler_loop(self) -> None:
         try:
@@ -196,6 +215,15 @@ class Daemon:
                 out.append(HackerOneScopeWatcher(target["name"], slug))
             elif slug and platform == "bugcrowd":
                 out.append(BugcrowdScopeWatcher(target["name"], slug))
+        if kind_filter is None or kind_filter == KIND_NEWS:
+            # H1 hacktivity for the target's program (disabled cleanly without
+            # API token — see watcher impl).
+            bb = target.get("bug_bounty") or {}
+            if (bb.get("platform") or "").lower() == "hackerone" and bb.get("slug"):
+                out.append(HackerOneHacktivityWatcher(target["name"], bb["slug"]))
+            # GitHub public events for each org
+            for org in target.get("github_orgs") or []:
+                out.append(GitHubEventsWatcher(target["name"], org))
         if kind_filter is None or kind_filter == KIND_JS:
             seeds = target.get("js_pages") or [
                 f"https://{d}/" for d in (target.get("root_domains") or [])

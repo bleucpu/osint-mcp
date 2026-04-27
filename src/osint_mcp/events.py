@@ -60,21 +60,10 @@ def extract_tags(
         if re.search(rf"\b{re.escape(kw.lower())}", text_l):
             tags.add(kw.lower())
 
-    # Heuristic: quoted subsystem names like "Vaults", "MCP apps"
-    for m in re.finditer(r'"([A-Z][A-Za-z0-9 ]{2,40})"', text):
-        tags.add(m.group(1).strip().lower())
-
-    # Heuristic: standalone capitalized tokens that look like product names
-    for m in re.finditer(r"\b([A-Z][a-z]{2,})\b", text):
-        tok = m.group(1).lower()
-        if tok in {"the", "this", "that", "with", "from", "into", "when", "what",
-                   "where", "after", "before", "also", "have"}:
-            continue
-        # Only include if it appears in a recognisable context (preceded by
-        # "the" / inside quotes / etc) — too aggressive otherwise.
-        # Skip: too noisy without a richer model.
-        pass
-
+    # Tags only come from the keyword vocabulary (default or per-target).
+    # We deliberately do NOT extract free-text quoted phrases or capitalized
+    # tokens — those produce noise like "sign in with your app" and pollute
+    # the tag namespace. If you want a tag, configure it in scoring_keywords.
     return sorted(tags)[:12]
 
 
@@ -89,14 +78,41 @@ def score_event(
     novelty: 1.0 for unique URL within target, 0.3 for repeat
     Recency is applied at query time, not insert time.
     """
+    score, _ = score_event_with_breakdown(title, payload, target_keywords, is_novel_url)
+    return score
+
+
+def score_event_with_breakdown(
+    title: str | None,
+    payload: dict[str, Any] | None,
+    target_keywords: dict[str, float] | None,
+    is_novel_url: bool,
+) -> tuple[float, dict[str, Any]]:
+    """
+    Same as score_event() but also returns a breakdown explaining the score.
+    The breakdown is stored on the event so a hunter can answer
+    "why did this score what it did?" without re-running the math.
+    """
     novelty = 1.0 if is_novel_url else 0.3
     text = ((title or "") + " " + json.dumps(payload or {}, default=str)).lower()
     kw = target_keywords if target_keywords else DEFAULT_SCORING_KEYWORDS
-    matched_sum = 0.0
+    matched: dict[str, float] = {}
     for keyword, weight in kw.items():
         if re.search(rf"\b{re.escape(keyword.lower())}", text):
-            matched_sum += float(weight)
-    return round(novelty * (1.0 + matched_sum), 2)
+            matched[keyword.lower()] = float(weight)
+    matched_sum = sum(matched.values())
+    score = round(novelty * (1.0 + matched_sum), 2)
+    breakdown = {
+        "score": score,
+        "novelty": novelty,
+        "base": 1.0,
+        "matched_keywords": matched,
+        "matched_sum": round(matched_sum, 2),
+        "is_novel_url": is_novel_url,
+        "using_default_keywords": target_keywords is None or not target_keywords,
+        "formula": "score = novelty * (1 + sum(weights))",
+    }
+    return score, breakdown
 
 
 def matches_ignore_patterns(text: str, patterns: list[str]) -> bool:

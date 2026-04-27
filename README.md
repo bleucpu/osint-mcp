@@ -96,13 +96,14 @@ ANTHROPIC_API_KEY          # feed_summary endpoint (Phase 3)
 
 **Targets**
 - `target_autodiscover(name_or_domain)` — read-only, returns everything we can find about a target
-- `target_add(name, ...)` — commit to watchlist (auto-discovers if no fields given)
+- `target_add(name, ...)` — commit to watchlist (auto-discovers if no fields given); also primes light watchers immediately so the target lights up with data without waiting for the next tick
 - `target_update(name, patch)` — fix/extend
 - `target_remove(name)`
 - `target_show(name)` — current config + watcher health
 - `target_list()`
 - `target_health(name?)` — which sources are healthy/broken/stale
 - `target_force_scan(name, kind?)` — trigger out-of-cadence scan
+- `target_rescore(name?, delete_filtered?)` — re-apply current scoring/tags/ignore_patterns to all stored events; useful after changing per-target keyword config or backfilling old events
 
 **Feed**
 - `feed_recent(target?, kind?, since?, tags?, min_score?, limit?, compact?)` — events with rich filters; `compact=true` returns just title/url/kind/tags/score for cheap AI consumption
@@ -138,17 +139,31 @@ scraping, ever.
 
 ## Bug bounty platform required env vars
 
-| Platform   | Required env vars                                   |
-|------------|-----------------------------------------------------|
-| HackerOne  | `HACKERONE_API_USERNAME` + `HACKERONE_API_TOKEN`    |
-| Bugcrowd   | `BUGCROWD_API_TOKEN`                                |
+| Platform   | Required env vars                                   | Watchers                              |
+|------------|-----------------------------------------------------|----------------------------------------|
+| HackerOne  | `HACKERONE_API_USERNAME` + `HACKERONE_API_TOKEN`    | scope-diff, hacktivity (disclosed reports) |
+| Bugcrowd   | `BUGCROWD_API_TOKEN`                                | scope-diff                            |
+
+## GitHub auth
+
+`GitHubEventsWatcher` resolves a token from, in order:
+
+1. `GITHUB_TOKEN` / `GH_TOKEN` env var
+2. `gh auth token` (the GitHub CLI's stored token — zero config if you've
+   run `gh auth login` on the machine)
+
+You don't need to set anything if you've already authenticated with `gh`.
+Without any token the watcher still works at GitHub's anonymous rate (60
+req/hour); with a token, 5000 req/hour. Source is surfaced in
+`system_status.optional_keys.github`.
 
 ## Status
 
 - [x] Phase 1: schema, Discord router, target tools, RSS watcher, BBOT watcher, MCP server
 - [x] Phase 2: H1/Bugcrowd scope-diff (official API only), certstream live watcher, feed_summary, first-ingestion Discord suppression
 - [x] Phase 2.5: event scoring + tag extraction at ingest, per-target keyword config, URL-based dedup, FTS5 query escape, watcher health visibility, JS bundle diff watcher, autodiscover candidate scoring + GitHub variant probing + status-page RSS auto-detection + certspotter fallback, RSS HEAD-validation at registration, Discord delivery diagnostics, target_diff tool
-- [ ] Phase 3: HackerOne hacktivity ingestion (official API), GitHub code search (`<target>.com`), Wayback CDX URL diff, GitHub secrets watcher (TruffleHog/NoseyParker via official GitHub API), semantic search via sqlite-vec, auto-trigger downstream tasks
+- [x] Phase 2.7: HackerOne hacktivity (official API), GitHub events watcher (with gh-CLI token fallback so it works zero-config), tag extraction noise removal (vocabulary-only), score_breakdown in payload (transparency), target_rescore for backfill, feed_summary llm_skip_reason, auto-fire light watchers on target_add, stale-watcher surface in system_status
+- [ ] Phase 3: GitHub code search (`<target>.com`), Wayback CDX URL diff, GitHub secrets watcher (TruffleHog/NoseyParker via official GitHub API), semantic search via sqlite-vec, auto-trigger downstream tasks
   - Twitter is intentionally *not* on the roadmap — third-party scrapers violate X ToS and the official API is paid; signal is already covered by company RSS, status pages, and GitHub release feeds.
 
 ## Per-target scoring + tag extraction

@@ -9,7 +9,7 @@ from typing import Any
 from ..db import Database, now_iso
 from ..events import (
     Event, extract_tags, ingest, matches_ignore_patterns, max_event_id,
-    score_event, suppress_range, url_already_seen,
+    score_event_with_breakdown, suppress_range, url_already_seen,
 )
 
 log = logging.getLogger("osint.watchers")
@@ -89,7 +89,15 @@ class Watcher(ABC):
         if not event.tags:
             event.tags = extract_tags(event.title, event.payload, keywords)
         if event.score == 0.0:
-            event.score = score_event(event.title, event.payload, keywords, is_novel_url)
+            score, breakdown = score_event_with_breakdown(
+                event.title, event.payload, keywords, is_novel_url,
+            )
+            event.score = score
+            # Stash the breakdown in payload so it survives in the DB and
+            # is queryable via feed_recent (non-compact mode).
+            if event.payload is None:
+                event.payload = {}
+            event.payload["_score_breakdown"] = breakdown
 
         return await ingest(db, event)
 

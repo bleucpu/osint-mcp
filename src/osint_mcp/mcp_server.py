@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import json
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -10,7 +11,10 @@ from .autodiscover import autodiscover
 from .config import Config
 from .daemon import Daemon
 from .db import Database
-from .events import ALL_KINDS, fetch_recent, fetch_search
+from .events import (
+    ALL_KINDS, extract_tags, fetch_recent, fetch_search,
+    score_event_with_breakdown, url_already_seen,
+)
 from .summarize import heuristic_summary, llm_summary
 from .targets import (
     TargetExists,
@@ -63,7 +67,7 @@ def build_server(cfg: Config, db: Database, daemon: Daemon) -> FastMCP:
         discovery report (when autodiscover ran).
         """
         try:
-            return await add_target(
+            result = await add_target(
                 db, name,
                 root_domains=root_domains,
                 github_orgs=github_orgs,
@@ -81,6 +85,16 @@ def build_server(cfg: Config, db: Database, daemon: Daemon) -> FastMCP:
                     "hint": "use target_update to modify"}
         except ValueError as e:
             return {"error": "invalid_args", "message": str(e)}
+
+        # Fire light-weight watchers immediately so the target lights up
+        # with data right away. BBOT (heavy) is skipped — run
+        # target_force_scan(kind="recon") manually when ready.
+        try:
+            prime = await daemon.prime_new_target(name)
+            result["primed"] = prime
+        except Exception as e:
+            result["prime_error"] = str(e) or repr(e)
+        return result
 
     @mcp.tool()
     async def target_update(name: str, patch: dict) -> dict:
@@ -155,6 +169,85 @@ def build_server(cfg: Config, db: Database, daemon: Daemon) -> FastMCP:
             return await daemon.trigger_target_now(name, kind)
         except ValueError as e:
             return {"error": "target_not_found", "message": str(e)}
+
+    @mcp.tool()
+    async def target_rescore(
+        name: str | None = None,
+        delete_filtered: bool = False,
+    ) -> dict:
+        """
+        Re-apply current per-target scoring_keywords + ignore_patterns to
+        every existing event for this target (or all targets if name is
+        None). Useful after changing the keyword config, or to backfill
+        events ingested before scoring/tagging existed. With
+        delete_filtered=True, events that now match an ignore_patterns
+        regex are removed; default is to keep them.
+        """
+        import json as _json, re as _re
+        from .events import matches_ignore_patterns
+
+        if name:
+            try:
+                target = await get_target(db, name)
+            except TargetNotFound:
+                return {"error": "target_not_found", "name": name}
+            targets = [target]
+        else:
+            targets = await list_targets(db)
+
+        total_rescored = 0
+        total_deleted = 0
+        per_target: list[dict] = []
+
+        for t in targets:
+            tn = t["name"]
+            kw = t.get("scoring_keywords") or None
+            ignore = t.get("ignore_patterns") or []
+            rows = await db.fetchall(
+                "SELECT id, title, url, payload FROM events WHERE target_name = ?",
+                (tn,),
+            )
+            rescored = 0
+            deleted = 0
+            for r in rows:
+                try:
+                    payload = _json.loads(r["payload"]) if r["payload"] else {}
+                except (ValueError, TypeError):
+                    payload = {}
+                title = r["title"] or ""
+                if delete_filtered and ignore:
+                    haystack = title + "\n" + str(payload)
+                    if matches_ignore_patterns(haystack, ignore):
+                        await db.execute("DELETE FROM events WHERE id = ?", (r["id"],))
+                        deleted += 1
+                        continue
+                # Recount novelty: was this URL the first one for the target?
+                # For backfill we don't worry about historical novelty — treat
+                # all as novel. This is a backfill tool, not a precise
+                # reproduction of original ingestion.
+                tags = extract_tags(title, payload, kw)
+                score, breakdown = score_event_with_breakdown(title, payload, kw, True)
+                payload["_score_breakdown"] = breakdown
+                await db.execute(
+                    "UPDATE events SET tags = ?, score = ?, payload = ? WHERE id = ?",
+                    (
+                        _json.dumps(tags) if tags else None,
+                        score,
+                        _json.dumps(payload, default=str),
+                        r["id"],
+                    ),
+                )
+                rescored += 1
+            per_target.append({"target": tn, "rescored": rescored, "deleted": deleted})
+            total_rescored += rescored
+            total_deleted += deleted
+
+        return {
+            "total_rescored": total_rescored,
+            "total_deleted": total_deleted,
+            "delete_filtered": delete_filtered,
+            "per_target": per_target,
+        }
 
     @mcp.tool()
     async def feed_recent(
@@ -259,18 +352,25 @@ def build_server(cfg: Config, db: Database, daemon: Daemon) -> FastMCP:
         Compact digest of recent events. If ANTHROPIC_API_KEY is set and
         use_llm=True, an LLM picks the highest-leverage threads to investigate
         first; otherwise a deterministic group-by-target/kind summary is
-        returned. The summary is meant to be cheap context for an AI hacker
-        deciding where to dig.
+        returned. When the LLM path is requested but unavailable, the
+        response includes `llm_skip_reason` explaining why (no key set,
+        API call failed, etc.) so the caller knows.
         """
         since = (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).isoformat()
         events = await fetch_recent(db, target=target, kind=kind, since=since, limit=limit)
         used_llm = False
+        llm_skip_reason: str | None = None
         if use_llm and cfg.anthropic_api_key:
             text = await llm_summary(events, cfg.anthropic_api_key)
             used_llm = True
+            if "(LLM summary failed:" in text:
+                llm_skip_reason = "anthropic api call failed; see summary text for details"
+        elif use_llm and not cfg.anthropic_api_key:
+            text = heuristic_summary(events)
+            llm_skip_reason = "ANTHROPIC_API_KEY not set; using deterministic summary"
         else:
             text = heuristic_summary(events)
-        return {
+        out: dict[str, Any] = {
             "summary": text,
             "event_count": len(events),
             "window_hours": hours_ago,
@@ -278,15 +378,75 @@ def build_server(cfg: Config, db: Database, daemon: Daemon) -> FastMCP:
             "kind_filter": kind,
             "used_llm": used_llm,
         }
+        if llm_skip_reason:
+            out["llm_skip_reason"] = llm_skip_reason
+        return out
 
     @mcp.tool()
     async def system_status() -> dict:
-        """Daemon + Discord routing + delivery stats. Useful for debugging."""
+        """Daemon + Discord routing + delivery stats + stale watchers."""
+        from .watchers.github_events import resolve_github_token
+        from .daemon import parse_duration
+
         # undelivered queue size
         row = await db.fetchone("SELECT COUNT(*) AS c FROM events WHERE delivered = 0")
         queue_size = row["c"] if row else 0
         delivery_stats = dict(daemon.router.stats)
         delivery_stats["queue_size"] = queue_size
+
+        # Stale watchers: any expected watcher that should have run by now
+        # (last_run is older than 2× its cadence) is flagged so silent
+        # failures surface here instead of being invisible.
+        now = datetime.now(timezone.utc)
+        stale: list[dict] = []
+        for t in await list_targets(db):
+            if not t.get("enabled"):
+                continue
+            for w in daemon._build_watchers_for_target(t):
+                cadence_str = (t.get("cadence_overrides") or {}).get(w.kind) \
+                              or cfg.cadences.get(w.kind)
+                if not cadence_str or cadence_str == "live":
+                    continue
+                try:
+                    cadence = parse_duration(cadence_str)
+                except Exception:
+                    continue
+                state = await db.fetchone(
+                    "SELECT last_run, last_success, last_error, metadata FROM watcher_state WHERE id = ?",
+                    (w.id,),
+                )
+                if state is None:
+                    stale.append({
+                        "id": w.id, "kind": w.kind, "target": t["name"],
+                        "issue": "never_run", "expected_cadence": cadence_str,
+                    })
+                    continue
+                meta = {}
+                try:
+                    meta = json.loads(state["metadata"]) if state["metadata"] else {}
+                except Exception:
+                    pass
+                if isinstance(meta, dict) and meta.get("disabled"):
+                    continue
+                last = state["last_run"]
+                if last:
+                    try:
+                        last_dt = datetime.fromisoformat(last)
+                        age = now - last_dt
+                        if age > cadence * 2:
+                            stale.append({
+                                "id": w.id, "kind": w.kind, "target": t["name"],
+                                "issue": "overdue",
+                                "last_run": last,
+                                "age_seconds": int(age.total_seconds()),
+                                "expected_cadence": cadence_str,
+                                "last_error": state["last_error"],
+                            })
+                    except ValueError:
+                        pass
+
+        gh_tok, gh_src = await resolve_github_token()
+
         return {
             "data_dir": str(cfg.data_dir),
             "db_path": str(cfg.db_path),
@@ -301,9 +461,10 @@ def build_server(cfg: Config, db: Database, daemon: Daemon) -> FastMCP:
             "optional_keys": {
                 "hackerone": bool(cfg.hackerone_token and cfg.hackerone_username),
                 "bugcrowd": bool(cfg.bugcrowd_token),
-                "github": bool(cfg.github_token),
+                "github": {"available": bool(gh_tok), "source": gh_src},
                 "anthropic": bool(cfg.anthropic_api_key),
             },
+            "stale_watchers": stale,
         }
 
     async def _watchers_view(target: dict) -> list[dict]:
