@@ -57,6 +57,10 @@ def build_server(cfg: Config, db: Database, daemon: Daemon) -> FastMCP:
         bbot_preset: str | None = None,
         cadence_overrides: dict | None = None,
         notes: str | None = None,
+        security_pages: list[str] | None = None,
+        scoring_keywords: dict | None = None,
+        ignore_patterns: list[str] | None = None,
+        js_pages: list[str] | None = None,
         auto: bool = True,
     ) -> dict:
         """
@@ -65,6 +69,15 @@ def build_server(cfg: Config, db: Database, daemon: Daemon) -> FastMCP:
         fill them. Pass an empty list (`[]`) to mean "explicitly none, don't
         autodiscover this field". Returns the stored target plus the
         discovery report (when autodiscover ran).
+
+        Notable optional fields:
+        - security_pages: list of URLs on the company's *own* site
+          (e.g. https://example.com/.well-known/security.txt or
+          https://example.com/security) — watched for scope/policy
+          changes without touching any bug-bounty platform.
+        - scoring_keywords: per-target keyword weights for ranking
+          (e.g. {"vault": 5, "credential": 5, "auth": 4}).
+        - ignore_patterns: regex strings to drop noise events.
         """
         try:
             result = await add_target(
@@ -78,6 +91,10 @@ def build_server(cfg: Config, db: Database, daemon: Daemon) -> FastMCP:
                 bbot_preset=bbot_preset,
                 cadence_overrides=cadence_overrides,
                 notes=notes,
+                security_pages=security_pages,
+                scoring_keywords=scoring_keywords,
+                ignore_patterns=ignore_patterns,
+                js_pages=js_pages,
                 auto=auto,
             )
         except TargetExists:

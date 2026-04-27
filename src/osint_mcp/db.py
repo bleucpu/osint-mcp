@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS targets (
     scoring_keywords  TEXT,             -- JSON object {keyword: weight}
     ignore_patterns   TEXT,             -- JSON array of regex strings
     js_pages          TEXT,             -- JSON array of URLs to scan for <script src>
+    security_pages    TEXT,             -- JSON array of company-published security/scope page URLs
     created_at        TEXT NOT NULL,
     updated_at        TEXT NOT NULL
 );
@@ -110,6 +111,7 @@ class Database:
             ("targets", "scoring_keywords", "TEXT"),
             ("targets", "ignore_patterns",  "TEXT"),
             ("targets", "js_pages",         "TEXT"),
+            ("targets", "security_pages",   "TEXT"),
             ("events",  "tags",             "TEXT"),
         ]
         for table, col, typ in adds:
@@ -167,6 +169,7 @@ def row_to_target(row: aiosqlite.Row) -> dict[str, Any]:
         "scoring_keywords": _json(_opt("scoring_keywords"), {}),
         "ignore_patterns": _json(_opt("ignore_patterns"), []),
         "js_pages": _json(_opt("js_pages"), []),
+        "security_pages": _json(_opt("security_pages"), []),
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }

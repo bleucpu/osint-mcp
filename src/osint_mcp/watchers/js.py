@@ -37,6 +37,31 @@ log = logging.getLogger("osint.js")
 
 _UA = "osint-mcp/0.1 (+https://github.com/bleucpu/osint-mcp; bug bounty research)"
 
+_UUID_RE = re.compile(
+    r"\b[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}\b"
+)
+_HEX_HASH_RE = re.compile(r"\b[0-9a-f]{16,64}\b")
+_NEXT_HASH_RE = re.compile(r"[-.][a-f0-9]{8,}(?=\.(?:js|mjs|css)\b)")
+
+
+def normalize_bundle_url(url: str) -> str:
+    """
+    Many SPAs serve bundles at URLs that include a deployment UUID or
+    content-hash that rotates on every release (e.g. claude.ai's
+    `https://a-cdn.claude.ai/v2/<UUID>/api.js`, or Next.js's
+    `/_next/static/chunks/main-abcd1234.js`). If we key the watcher state
+    by raw URL, we'd never see a "diff" because the URL itself changes.
+
+    Normalize by replacing UUIDs / hex hashes / Next-style suffix hashes
+    with `<HASH>`, so the bundle's logical identity is stable across
+    deploys.
+    """
+    u = _UUID_RE.sub("<UUID>", url)
+    u = _NEXT_HASH_RE.sub("-<HASH>", u)
+    u = _HEX_HASH_RE.sub("<HASH>", u)
+    return u
+
+
 ENDPOINT_RE = re.compile(r'["\'`](/(?:v\d+|api|graphql|internal|admin)/[A-Za-z0-9_/{}.-]{2,80})["\'`]')
 STATSIG_RE  = re.compile(r"client-[A-Za-z0-9]{20,}")
 LD_RE       = re.compile(r"\bclient-side-id[\"'\s:=]+[\"']([A-Za-z0-9-]{20,})")
@@ -76,45 +101,49 @@ class JsBundleWatcher(Watcher):
             bundle_urls = await self._collect_bundle_urls(client)
 
             for burl in sorted(bundle_urls)[:30]:
+                # Use the normalized URL as the watcher-state key so a
+                # rotating UUID in the path doesn't break diffing.
+                bkey = normalize_bundle_url(burl)
                 try:
                     r = await client.get(burl)
-                    if r.status_code != 200:
-                        continue
-                    body = r.text
                 except httpx.HTTPError as e:
-                    result.errors.append(f"{burl}: {e}")
+                    msg = str(e) or repr(e)
+                    result.errors.append(f"{burl}: {msg}")
                     continue
+                if r.status_code != 200:
+                    result.errors.append(f"{burl}: HTTP {r.status_code}")
+                    continue
+                body = r.text
 
                 bhash = hashlib.sha256(body.encode("utf-8", "replace")).hexdigest()
-                cur_state["bundles"][burl] = bhash
+                cur_state["bundles"][bkey] = bhash
                 extracts = _extract_signals(body)
-                cur_state["extracts"][burl] = extracts
+                cur_state["extracts"][bkey] = extracts
 
-                prev_hash = prev_state.get("bundles", {}).get(burl)
+                prev_hash = prev_state.get("bundles", {}).get(bkey)
+                # Tolerate older state that keyed by raw URL
+                if prev_hash is None and burl != bkey:
+                    prev_hash = prev_state.get("bundles", {}).get(burl)
                 if prev_hash is None or prev_hash == bhash:
                     continue
 
-                prev_ext = prev_extracts.get(burl, {})
+                prev_ext = prev_extracts.get(bkey, prev_extracts.get(burl, {}))
                 diff = _signal_diff(prev_ext, extracts)
-                if not (diff["added"]["endpoints"] or diff["added"]["feature_flags"]
-                        or diff["added"]["jwt_kids"] or diff["added"]["oauth_clients"]):
-                    # Bundle changed but no new interesting signal; emit a
-                    # low-score event so the change is visible if you query.
-                    pass
 
                 ev = Event(
                     kind=KIND_JS,
-                    source=f"jsdiff:{burl}",
+                    source=f"jsdiff:{bkey}",
                     target_name=self.target_name,
-                    title=f"JS bundle changed: {burl.rsplit('/', 1)[-1] or burl}",
+                    title=f"JS bundle changed: {bkey.rsplit('/', 1)[-1] or bkey}",
                     url=burl,
                     payload={
                         "bundle_url": burl,
+                        "bundle_key": bkey,
                         "prev_hash": prev_hash,
                         "new_hash": bhash,
                         "diff": diff,
                     },
-                    dedup_key=f"jsdiff:{burl}:{bhash}",
+                    dedup_key=f"jsdiff:{bkey}:{bhash}",
                 )
                 if await self.emit(db, ev):
                     result.new_events += 1

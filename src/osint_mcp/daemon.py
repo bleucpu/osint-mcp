@@ -19,6 +19,7 @@ from .watchers.h1_hacktivity import HackerOneHacktivityWatcher
 from .watchers.js import JsBundleWatcher
 from .watchers.rss import RssWatcher
 from .watchers.scope import BugcrowdScopeWatcher, HackerOneScopeWatcher
+from .watchers.security_page import SecurityPageWatcher
 
 log = logging.getLogger("osint.daemon")
 
@@ -215,6 +216,11 @@ class Daemon:
                 out.append(HackerOneScopeWatcher(target["name"], slug))
             elif slug and platform == "bugcrowd":
                 out.append(BugcrowdScopeWatcher(target["name"], slug))
+            # Company-published security/scope pages — fully ToS-clean,
+            # no platform creds, watches the source not the mirror.
+            for sp in target.get("security_pages") or []:
+                if sp:
+                    out.append(SecurityPageWatcher(target["name"], sp))
         if kind_filter is None or kind_filter == KIND_NEWS:
             # H1 hacktivity for the target's program (disabled cleanly without
             # API token — see watcher impl).

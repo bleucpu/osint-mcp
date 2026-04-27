@@ -37,6 +37,7 @@ async def add_target(
     scoring_keywords: dict | None = None,
     ignore_patterns: list | None = None,
     js_pages: list[str] | None = None,
+    security_pages: list[str] | None = None,
     auto: bool = True,
 ) -> dict[str, Any]:
     """
@@ -64,6 +65,8 @@ async def add_target(
             twitter_handles = d.twitter_handles
         if not bug_bounty and d.bug_bounty_programs:
             bug_bounty = d.bug_bounty_programs[0]
+        if not security_pages and d.security_pages:
+            security_pages = list(d.security_pages)
 
     if not root_domains:
         raise ValueError(
@@ -81,8 +84,8 @@ async def add_target(
             (name, root_domains, github_orgs, rss_feeds, status_page,
              twitter_handles, bug_bounty, bbot_preset, cadence_overrides,
              notes, scoring_keywords, ignore_patterns, js_pages,
-             enabled, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+             security_pages, enabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         """,
         (
             name,
@@ -98,6 +101,7 @@ async def add_target(
             json.dumps(scoring_keywords) if scoring_keywords else None,
             json.dumps(ignore_patterns) if ignore_patterns else None,
             json.dumps(js_pages) if js_pages else None,
+            json.dumps(security_pages) if security_pages else None,
             now,
             now,
         ),
@@ -166,7 +170,7 @@ async def update_target(
     json_fields = {
         "root_domains", "github_orgs", "rss_feeds",
         "twitter_handles", "bug_bounty", "cadence_overrides",
-        "scoring_keywords", "ignore_patterns", "js_pages",
+        "scoring_keywords", "ignore_patterns", "js_pages", "security_pages",
     }
     scalar_fields = {"status_page", "bbot_preset", "notes", "enabled"}
 

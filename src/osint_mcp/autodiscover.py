@@ -43,6 +43,7 @@ class Discovery:
     status_page: str | None = None
     twitter_handles: list[str] = field(default_factory=list)
     bug_bounty_programs: list[dict[str, Any]] = field(default_factory=list)
+    security_pages: list[str] = field(default_factory=list)
     ct_subdomain_count: int | None = None
     notes: list[str] = field(default_factory=list)
     confidence: str = "low"
@@ -55,6 +56,7 @@ class Discovery:
             "status_page": self.status_page,
             "twitter_handles": self.twitter_handles,
             "bug_bounty_programs": self.bug_bounty_programs,
+            "security_pages": self.security_pages,
             "ct_subdomain_count": self.ct_subdomain_count,
             "notes": self.notes,
             "confidence": self.confidence,
@@ -102,6 +104,10 @@ async def autodiscover(name_or_domain: str) -> Discovery:
 
         for domain in list(d.candidate_root_domains):
             await _enrich_from_homepage(client, domain, d)
+
+        # Probe common security/scope page paths for each candidate domain
+        for domain in list(d.candidate_root_domains):
+            await _probe_security_pages(client, domain, d)
 
         # Score / re-rank candidates against the target name
         _rerank_candidates(d, target_token)
@@ -182,6 +188,49 @@ def _rerank_candidates(d: Discovery, target_token: str) -> None:
            "topics", "trending", "explore", "enterprise", "customer-stories",
            "team", "personal", "open-source", "github", "security"}
     d.github_orgs = [o for o in d.github_orgs if o.lower() not in bad]
+
+
+SECURITY_PATHS = (
+    "/.well-known/security.txt",
+    "/security.txt",
+    "/security",
+    "/security/disclosure",
+    "/security/responsible-disclosure",
+    "/bug-bounty",
+    "/legal/security",
+    "/trust/security",
+)
+
+
+async def _probe_security_pages(
+    client: httpx.AsyncClient, domain: str, d: Discovery
+) -> None:
+    """
+    Probe the company's own /security, /.well-known/security.txt, /bug-bounty
+    etc. for any page that returns 200 and looks like a real security/scope
+    document. These are watched by SecurityPageWatcher — no platform creds
+    needed, fully ToS-clean.
+    """
+    for path in SECURITY_PATHS:
+        url = f"https://{domain}{path}"
+        try:
+            r = await client.get(url)
+        except httpx.HTTPError:
+            continue
+        if r.status_code != 200:
+            continue
+        ctype = r.headers.get("content-type", "").lower()
+        body = r.text[:4000].lower()
+        looks_real = (
+            "security" in body or "vulnerability" in body or "disclosure" in body
+            or "scope" in body or "bounty" in body or "report" in body
+            or "text/plain" in ctype
+        )
+        if not looks_real:
+            continue
+        canonical = url.split("?")[0].split("#")[0].rstrip("/")
+        if canonical not in d.security_pages:
+            d.security_pages.append(canonical)
 
 
 async def _probe_github_org_variants(

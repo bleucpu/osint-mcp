@@ -83,10 +83,24 @@ async def resolve_github_token() -> tuple[str | None, str]:
 INTERESTING_TYPES = {
     "PushEvent",
     "ReleaseEvent",
-    "CreateEvent",       # new branches/tags/repos
-    "PublicEvent",       # repo turned public
-    "MemberEvent",       # collaborator added
-    "RepositoryEvent",   # repo created/transferred/etc.
+    "CreateEvent",            # new branches/tags/repos
+    "PublicEvent",             # repo turned public
+    "MemberEvent",             # collaborator added
+    "RepositoryEvent",         # repo created/transferred/etc.
+    "IssuesEvent",             # new issue (action=opened only — see filter)
+    "PullRequestEvent",        # new PR (action=opened only — see filter)
+    "PullRequestReviewEvent",  # PR review submitted (action=submitted)
+}
+
+# Per-event-type action filters: when set, only events whose
+# payload.action matches one of these values are kept. Drops most of the
+# noise (closing/labeling/edits) while keeping "something new appeared".
+INTERESTING_ACTIONS = {
+    "IssuesEvent": {"opened", "reopened"},
+    "PullRequestEvent": {"opened", "reopened"},
+    "PullRequestReviewEvent": {"submitted"},
+    "MemberEvent": {"added"},
+    "RepositoryEvent": {"created", "publicized", "transferred"},
 }
 
 
@@ -151,6 +165,11 @@ class GitHubEventsWatcher(Watcher):
             etype = item.get("type")
             if etype not in INTERESTING_TYPES:
                 continue
+            allowed_actions = INTERESTING_ACTIONS.get(etype)
+            if allowed_actions is not None:
+                action = (item.get("payload") or {}).get("action") or ""
+                if action not in allowed_actions:
+                    continue
             ev = _gh_event_to_event(item, self.org, self.target_name)
             if ev is None:
                 continue
@@ -222,6 +241,41 @@ def _gh_event_to_event(item: dict, org: str, target: str) -> Event | None:
         action = payload.get("action") or ""
         title = f"GitHub: repo {repo} {action}"
         url = f"https://github.com/{repo}"
+    elif etype == "IssuesEvent":
+        issue = payload.get("issue") or {}
+        action = payload.get("action") or "opened"
+        num = issue.get("number")
+        issue_title = issue.get("title") or "(no title)"
+        title = f"GitHub issue {action}: {repo}#{num} — {issue_title}"[:200]
+        url = issue.get("html_url") or f"https://github.com/{repo}/issues/{num}"
+        detail["issue_number"] = num
+        detail["action"] = action
+        detail["body"] = (issue.get("body") or "")[:1500]
+        detail["labels"] = [l.get("name") for l in (issue.get("labels") or []) if isinstance(l, dict)]
+        detail["author"] = (issue.get("user") or {}).get("login")
+    elif etype == "PullRequestEvent":
+        pr = payload.get("pull_request") or {}
+        action = payload.get("action") or "opened"
+        num = pr.get("number") or payload.get("number")
+        pr_title = pr.get("title") or "(no title)"
+        title = f"GitHub PR {action}: {repo}#{num} — {pr_title}"[:200]
+        url = pr.get("html_url") or f"https://github.com/{repo}/pull/{num}"
+        detail["pr_number"] = num
+        detail["action"] = action
+        detail["body"] = (pr.get("body") or "")[:1500]
+        detail["author"] = (pr.get("user") or {}).get("login")
+        detail["base"] = (pr.get("base") or {}).get("ref")
+        detail["head"] = (pr.get("head") or {}).get("ref")
+    elif etype == "PullRequestReviewEvent":
+        pr = payload.get("pull_request") or {}
+        review = payload.get("review") or {}
+        num = pr.get("number")
+        pr_title = pr.get("title") or "(no title)"
+        state = review.get("state") or ""
+        title = f"GitHub review ({state}): {repo}#{num} — {pr_title}"[:200]
+        url = review.get("html_url") or pr.get("html_url")
+        detail["state"] = state
+        detail["body"] = (review.get("body") or "")[:1000]
 
     if not title:
         return None

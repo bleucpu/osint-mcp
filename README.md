@@ -175,8 +175,39 @@ req/hour); with a token, 5000 req/hour. Source is surfaced in
 - [x] Phase 2: H1/Bugcrowd scope-diff (official API only), certstream live watcher, feed_summary, first-ingestion Discord suppression
 - [x] Phase 2.5: event scoring + tag extraction at ingest, per-target keyword config, URL-based dedup, FTS5 query escape, watcher health visibility, JS bundle diff watcher, autodiscover candidate scoring + GitHub variant probing + status-page RSS auto-detection + certspotter fallback, RSS HEAD-validation at registration, Discord delivery diagnostics, target_diff tool
 - [x] Phase 2.7: HackerOne hacktivity (official API), GitHub events watcher (with gh-CLI token fallback so it works zero-config), tag extraction noise removal (vocabulary-only), score_breakdown in payload (transparency), target_rescore for backfill, feed_summary llm_skip_reason, auto-fire light watchers on target_add, stale-watcher surface in system_status
+- [x] Phase 2.8: bug-bounty-platform safety gate (off by default), security-page watcher (company's *own* /security, /.well-known/security.txt etc — fully ToS-clean alternative to platform scope-diff), expanded github_events to IssuesEvent/PullRequestEvent action=opened (the highest-leverage filter change for research-heavy orgs), JS bundle URL normalization (stable identity across UUID/hash-rotating CDN paths so claude.ai-style bundles diff correctly), autodiscover seeds security_pages
 - [ ] Phase 3: GitHub code search (`<target>.com`), Wayback CDX URL diff, GitHub secrets watcher (TruffleHog/NoseyParker via official GitHub API), semantic search via sqlite-vec, auto-trigger downstream tasks
   - Twitter is intentionally *not* on the roadmap — third-party scrapers violate X ToS and the official API is paid; signal is already covered by company RSS, status pages, and GitHub release feeds.
+
+## Security-page watcher (recommended scope-diff source)
+
+Most companies with bounty programs publish their scope, payout ranges,
+and disclosure policy on their *own* website (`/security`,
+`/.well-known/security.txt`, `/security/disclosure`, `/bug-bounty`,
+etc). Watching those pages gives scope-change signal **from the source**
+— without ever touching HackerOne or Bugcrowd, no platform credentials,
+no ToS risk.
+
+`target_autodiscover` automatically probes common security-page paths
+and seeds `security_pages` in the discovery report. `target_add`
+accepts a `security_pages: list[str]` argument so an AI / user can also
+add custom URLs (or override the autodiscovered set). Once stored,
+`SecurityPageWatcher` polls each page on the `scope` cadence (1h
+default), hashes the visible text, and emits a `scope` event tagged
+`security_page`/`scope_source` whenever the content changes — with a
+line-set diff in the payload so you can see exactly what got added or
+removed.
+
+```python
+target_add(
+    name="anthropic",
+    root_domains=["anthropic.com"],
+    security_pages=[
+        "https://anthropic.com/.well-known/security.txt",
+        "https://www.anthropic.com/security",  # or whatever the program page is
+    ],
+)
+```
 
 ## Per-target scoring + tag extraction
 
