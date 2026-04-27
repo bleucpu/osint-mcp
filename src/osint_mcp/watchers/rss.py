@@ -29,7 +29,7 @@ class RssWatcher(Watcher):
         try:
             text = await _fetch(self.feed_url)
         except Exception as e:
-            result.errors.append(str(e))
+            result.errors.append(str(e) or repr(e))
             return result
 
         parsed = feedparser.parse(text)

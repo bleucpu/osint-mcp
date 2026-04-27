@@ -45,6 +45,15 @@ class DiscordRouter:
         self._owns_client = client is None
         self._timestamps: dict[str, deque[float]] = defaultdict(deque)
         self._locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        # Diagnostics surfaced in system_status (in-memory, resets on restart)
+        self.stats: dict[str, Any] = {
+            "delivered_total": 0,
+            "failed_total": 0,
+            "last_delivery_at": None,
+            "last_failure_at": None,
+            "last_error": None,
+            "rate_limit_hits": 0,
+        }
 
     async def close(self) -> None:
         if self._owns_client:
@@ -65,20 +74,31 @@ class DiscordRouter:
 
         async with self._locks[url]:
             await self._respect_rate_limit(url)
+            from datetime import datetime, timezone
             try:
                 resp = await self.client.post(url, json=body)
                 if resp.status_code == 429:
                     retry = float(resp.headers.get("retry-after", "1"))
+                    self.stats["rate_limit_hits"] += 1
                     log.warning("discord rate-limited, sleeping %.1fs", retry)
                     await asyncio.sleep(retry + 0.5)
                     return False
                 if resp.status_code >= 400:
+                    err = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    self.stats["failed_total"] += 1
+                    self.stats["last_failure_at"] = datetime.now(timezone.utc).isoformat()
+                    self.stats["last_error"] = err
                     log.error("discord webhook %s returned %s: %s",
                               url[:60], resp.status_code, resp.text[:200])
                     return False
                 self._timestamps[url].append(time.monotonic())
+                self.stats["delivered_total"] += 1
+                self.stats["last_delivery_at"] = datetime.now(timezone.utc).isoformat()
                 return True
             except httpx.HTTPError as e:
+                self.stats["failed_total"] += 1
+                self.stats["last_failure_at"] = datetime.now(timezone.utc).isoformat()
+                self.stats["last_error"] = f"network: {e}"
                 log.error("discord webhook error: %s", e)
                 return False
 

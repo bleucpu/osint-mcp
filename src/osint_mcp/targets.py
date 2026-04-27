@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
 
-from .autodiscover import autodiscover
+import httpx
+
+from .autodiscover import USER_AGENT, autodiscover
 from .db import Database, now_iso, row_to_target
 
 log = logging.getLogger("osint.targets")
@@ -31,6 +34,9 @@ async def add_target(
     bbot_preset: str | None = None,
     cadence_overrides: dict | None = None,
     notes: str | None = None,
+    scoring_keywords: dict | None = None,
+    ignore_patterns: list | None = None,
+    js_pages: list[str] | None = None,
     auto: bool = True,
 ) -> dict[str, Any]:
     """
@@ -66,6 +72,7 @@ async def add_target(
         )
 
     rss_list = _normalize_rss(rss_feeds)
+    rss_validation = await _validate_rss(rss_list)
     now = now_iso()
 
     await db.execute(
@@ -73,8 +80,9 @@ async def add_target(
         INSERT INTO targets
             (name, root_domains, github_orgs, rss_feeds, status_page,
              twitter_handles, bug_bounty, bbot_preset, cadence_overrides,
-             notes, enabled, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+             notes, scoring_keywords, ignore_patterns, js_pages,
+             enabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
         """,
         (
             name,
@@ -87,13 +95,52 @@ async def add_target(
             bbot_preset or "subdomain-enum",
             json.dumps(cadence_overrides) if cadence_overrides else None,
             notes,
+            json.dumps(scoring_keywords) if scoring_keywords else None,
+            json.dumps(ignore_patterns) if ignore_patterns else None,
+            json.dumps(js_pages) if js_pages else None,
             now,
             now,
         ),
     )
 
     target = await get_target(db, name)
-    return {"target": target, "discovery": discovery}
+    result: dict[str, Any] = {"target": target, "discovery": discovery}
+    if rss_validation:
+        result["validation_warnings"] = rss_validation
+    return result
+
+
+async def _validate_rss(rss_list: list[dict[str, str]]) -> list[dict[str, Any]]:
+    """HEAD-check each RSS feed; return non-blocking warnings for any non-200."""
+    if not rss_list:
+        return []
+
+    async def _check(feed: dict[str, str]) -> dict[str, Any] | None:
+        url = feed.get("url")
+        if not url:
+            return None
+        try:
+            async with httpx.AsyncClient(
+                timeout=8.0, follow_redirects=True,
+                headers={"User-Agent": USER_AGENT},
+            ) as c:
+                # HEAD first; some feeds 405 HEAD so fall back to GET
+                try:
+                    r = await c.head(url)
+                    if r.status_code == 405:
+                        r = await c.get(url)
+                except httpx.HTTPError:
+                    r = await c.get(url)
+            if r.status_code >= 400:
+                return {"feed": url, "status": r.status_code,
+                        "warning": f"feed returned HTTP {r.status_code} at registration"}
+        except httpx.HTTPError as e:
+            return {"feed": url, "status": "error",
+                    "warning": f"feed unreachable at registration: {e}"}
+        return None
+
+    results = await asyncio.gather(*[_check(f) for f in rss_list], return_exceptions=True)
+    return [r for r in results if isinstance(r, dict)]
 
 
 async def get_target(
@@ -119,6 +166,7 @@ async def update_target(
     json_fields = {
         "root_domains", "github_orgs", "rss_feeds",
         "twitter_handles", "bug_bounty", "cadence_overrides",
+        "scoring_keywords", "ignore_patterns", "js_pages",
     }
     scalar_fields = {"status_page", "bbot_preset", "notes", "enabled"}
 

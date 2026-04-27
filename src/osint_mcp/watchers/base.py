@@ -7,7 +7,10 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..db import Database, now_iso
-from ..events import Event, ingest, max_event_id, suppress_range
+from ..events import (
+    Event, extract_tags, ingest, matches_ignore_patterns, max_event_id,
+    score_event, suppress_range, url_already_seen,
+)
 
 log = logging.getLogger("osint.watchers")
 
@@ -47,8 +50,9 @@ class Watcher(ABC):
             result = await self.run(db)
         except Exception as e:
             log.exception("watcher %s failed", self.id)
-            await update_watcher_state(db, self, error=str(e))
-            return WatcherResult(errors=[str(e)])
+            msg = str(e) or repr(e)
+            await update_watcher_state(db, self, error=msg)
+            return WatcherResult(errors=[msg])
 
         if first_run and result.new_events > 0 and self._emit_sources:
             suppressed = 0
@@ -64,10 +68,51 @@ class Watcher(ABC):
         return result
 
     async def emit(self, db: Database, event: Event) -> bool:
+        """
+        Apply target-aware tag extraction, ignore-pattern filtering, and
+        novelty-based scoring before ingesting. Returns False if the event
+        was filtered or already known.
+        """
         if not hasattr(self, "_emit_sources"):
             self._emit_sources = set()
         self._emit_sources.add(event.source)
+
+        target_cfg = await _load_target_config(db, self.target_name)
+        ignore = target_cfg.get("ignore_patterns") or []
+        if ignore:
+            haystack = (event.title or "") + "\n" + str(event.payload or {})
+            if matches_ignore_patterns(haystack, ignore):
+                return False
+
+        keywords = target_cfg.get("scoring_keywords") or None
+        is_novel_url = not await url_already_seen(db, event.target_name, event.url)
+        if not event.tags:
+            event.tags = extract_tags(event.title, event.payload, keywords)
+        if event.score == 0.0:
+            event.score = score_event(event.title, event.payload, keywords, is_novel_url)
+
         return await ingest(db, event)
+
+
+async def _load_target_config(db: Database, name: str | None) -> dict:
+    if not name:
+        return {}
+    row = await db.fetchone(
+        "SELECT scoring_keywords, ignore_patterns FROM targets WHERE name = ?",
+        (name,),
+    )
+    if row is None:
+        return {}
+    out: dict = {}
+    for f in ("scoring_keywords", "ignore_patterns"):
+        try:
+            v = row[f]
+            if v:
+                import json as _json
+                out[f] = _json.loads(v)
+        except (KeyError, IndexError, ValueError):
+            pass
+    return out
 
 
 async def _is_first_run(db: Database, watcher_id: str) -> bool:

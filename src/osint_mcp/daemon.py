@@ -10,10 +10,11 @@ from typing import Any
 from .config import Config
 from .db import Database
 from .discord import DiscordRouter, deliver_pending
-from .events import KIND_NEWS, KIND_RECON, KIND_SCOPE
+from .events import KIND_JS, KIND_NEWS, KIND_RECON, KIND_SCOPE
 from .targets import list_targets
 from .watchers.bbot import BbotWatcher
 from .watchers.certstream import run_certstream
+from .watchers.js import JsBundleWatcher
 from .watchers.rss import RssWatcher
 from .watchers.scope import BugcrowdScopeWatcher, HackerOneScopeWatcher
 
@@ -195,4 +196,14 @@ class Daemon:
                 out.append(HackerOneScopeWatcher(target["name"], slug))
             elif slug and platform == "bugcrowd":
                 out.append(BugcrowdScopeWatcher(target["name"], slug))
+        if kind_filter is None or kind_filter == KIND_JS:
+            seeds = target.get("js_pages") or [
+                f"https://{d}/" for d in (target.get("root_domains") or [])
+            ]
+            if seeds and target.get("root_domains"):
+                out.append(JsBundleWatcher(
+                    target["name"],
+                    seed_pages=seeds,
+                    own_domains=target["root_domains"],
+                ))
         return out

@@ -105,9 +105,10 @@ ANTHROPIC_API_KEY          # feed_summary endpoint (Phase 3)
 - `target_force_scan(name, kind?)` — trigger out-of-cadence scan
 
 **Feed**
-- `feed_recent(target?, kind?, since?, limit?)` — raw events, time-windowed
-- `feed_search(query, target?, since?)` — FTS5 keyword search
+- `feed_recent(target?, kind?, since?, tags?, min_score?, limit?, compact?)` — events with rich filters; `compact=true` returns just title/url/kind/tags/score for cheap AI consumption
+- `feed_search(query, target?, since?, compact?)` — FTS5 keyword search; special chars (hyphens, parens) auto-escaped, AND/OR/NOT/NEAR operators preserved
 - `feed_summary(target?, kind?, hours_ago?)` — compact digest; uses Anthropic API if `ANTHROPIC_API_KEY` is set, otherwise a deterministic group-by summary
+- `target_diff(name, since?, hours_ago?, min_score?)` — "what changed for this target since I last looked"; events grouped by kind + scope-change highlights
 
 ## Compliance and Terms of Service
 
@@ -146,5 +147,25 @@ scraping, ever.
 
 - [x] Phase 1: schema, Discord router, target tools, RSS watcher, BBOT watcher, MCP server
 - [x] Phase 2: H1/Bugcrowd scope-diff (official API only), certstream live watcher, feed_summary, first-ingestion Discord suppression
-- [ ] Phase 3: JS bundle hash watcher, GitHub secrets watcher (TruffleHog/NoseyParker via official GitHub API), semantic search, auto-trigger downstream tasks
+- [x] Phase 2.5: event scoring + tag extraction at ingest, per-target keyword config, URL-based dedup, FTS5 query escape, watcher health visibility, JS bundle diff watcher, autodiscover candidate scoring + GitHub variant probing + status-page RSS auto-detection + certspotter fallback, RSS HEAD-validation at registration, Discord delivery diagnostics, target_diff tool
+- [ ] Phase 3: HackerOne hacktivity ingestion (official API), GitHub code search (`<target>.com`), Wayback CDX URL diff, GitHub secrets watcher (TruffleHog/NoseyParker via official GitHub API), semantic search via sqlite-vec, auto-trigger downstream tasks
   - Twitter is intentionally *not* on the roadmap — third-party scrapers violate X ToS and the official API is paid; signal is already covered by company RSS, status pages, and GitHub release feeds.
+
+## Per-target scoring + tag extraction
+
+Each event gets a `score` (novelty × keyword_weight) and a list of `tags`
+extracted from the title and payload. By default a sensible bug-bounty-tuned
+keyword dict is used (`vault`, `credential`, `ssrf`, `idor`, `oauth`,
+`admin`, `breach`, `vulnerability`, etc.). Override per-target:
+
+```python
+target_update("anthropic", patch={
+    "scoring_keywords": {"vault": 5, "credential": 5, "mcp": 4, "agent": 3, "oauth": 4},
+    "ignore_patterns": [r"^Elevated errors on (Opus|Sonnet|Haiku)"]
+})
+```
+
+Then `feed_recent(target="anthropic", min_score=10, tags=["vault"])` returns
+only the high-signal vault events; `feed_recent(target="anthropic", limit=20)`
+shows everything ranked. Static "give me everything" → curated stream by
+default, full firehose with `min_score=0`.

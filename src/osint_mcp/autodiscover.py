@@ -82,11 +82,13 @@ async def autodiscover(name_or_domain: str) -> Discovery:
     Read-only enrichment for a target. Probes:
       - candidate root domains (TLD probing if a name was given)
       - homepage HTML for RSS, GitHub, Twitter, status page
-      - HackerOne / Bugcrowd program existence (slug variants)
-      - crt.sh subdomain count for sanity
+      - GitHub org slug variants via api.github.com (official API)
+      - status_page/history.rss as a candidate RSS feed (Statuspage convention)
+      - subdomain count via crt.sh, with certspotter fallback
     """
     d = Discovery()
     looks_like_domain = "." in name_or_domain and " " not in name_or_domain
+    target_token = name_or_domain.split(".", 1)[0].lower() if looks_like_domain else name_or_domain.lower()
 
     async with httpx.AsyncClient(
         timeout=8.0,
@@ -101,6 +103,23 @@ async def autodiscover(name_or_domain: str) -> Discovery:
         for domain in list(d.candidate_root_domains):
             await _enrich_from_homepage(client, domain, d)
 
+        # Score / re-rank candidates against the target name
+        _rerank_candidates(d, target_token)
+
+        # Statuspage convention: many companies put their incident RSS at
+        # <status_page>/history.rss. Add it as a candidate feed if not present.
+        if d.status_page:
+            history = d.status_page.rstrip("/") + "/history.rss"
+            if not any(f.get("url") == history for f in d.rss_feeds):
+                d.rss_feeds.append({
+                    "url": history,
+                    "title": "Status incidents",
+                    "type": "application/rss+xml",
+                })
+
+        # GitHub org slug variants via official API (public unauth endpoint)
+        await _probe_github_org_variants(client, target_token, d)
+
         # NOTE: We deliberately DO NOT probe hackerone.com / bugcrowd.com to
         # detect program existence. Anything against those platforms must go
         # through their official APIs — see watchers/scope.py and the
@@ -113,12 +132,91 @@ async def autodiscover(name_or_domain: str) -> Discovery:
 
         if d.candidate_root_domains:
             try:
-                d.ct_subdomain_count = await _crtsh_count(client, d.candidate_root_domains[0])
+                d.ct_subdomain_count = await _ct_subdomain_count(client, d.candidate_root_domains[0])
             except Exception as e:
-                d.notes.append(f"crt.sh check failed: {e}")
+                d.notes.append(f"CT subdomain count failed: {e}")
 
     d.confidence = _score_confidence(d)
     return d
+
+
+def _rerank_candidates(d: Discovery, target_token: str) -> None:
+    """
+    Reject candidates that are clearly someone else's infra. The most common
+    bad case is OpenAI's homepage embedding a third-party status badge or a
+    twitter-share link that points to "infomaniak" / "intent" etc. Filter
+    twitter handles and status_page to ones that contain or relate to the
+    target name.
+    """
+    tt = target_token.lower()
+
+    # Twitter: prefer handles that look related to the target name
+    if d.twitter_handles:
+        ranked = sorted(
+            d.twitter_handles,
+            key=lambda h: (
+                0 if (tt in h.lower() or h.lower() in tt) else 1,
+                len(h),
+            ),
+        )
+        # If the top one is unrelated (no token match either way), drop it
+        if ranked and (tt not in ranked[0].lower() and ranked[0].lower() not in tt):
+            ranked = []
+        d.twitter_handles = ranked[:5]
+
+    # Status page: only accept if host contains target token
+    if d.status_page:
+        try:
+            host = urlparse(d.status_page).hostname or ""
+            if tt not in host.lower():
+                d.notes.append(
+                    f"discarded status_page candidate {d.status_page} "
+                    f"(host did not match target token '{tt}')"
+                )
+                d.status_page = None
+        except Exception:
+            d.status_page = None
+
+    # GitHub orgs: drop anything that's clearly a github.com nav link
+    bad = {"login", "signup", "features", "pricing", "about", "marketplace",
+           "topics", "trending", "explore", "enterprise", "customer-stories",
+           "team", "personal", "open-source", "github", "security"}
+    d.github_orgs = [o for o in d.github_orgs if o.lower() not in bad]
+
+
+async def _probe_github_org_variants(
+    client: httpx.AsyncClient, target_token: str, d: Discovery
+) -> None:
+    """Try common slug variants against api.github.com/users/{slug} (public)."""
+    if not target_token:
+        return
+    # Skip if homepage already gave us a github org
+    if d.github_orgs:
+        return
+    base = re.sub(r"[^a-z0-9]+", "", target_token.lower())
+    if not base:
+        return
+    variants = [base, base + "s", base + "-ai", base + "ai", base.rstrip("s")]
+    seen = set()
+    for v in variants:
+        if v in seen or len(v) < 2:
+            continue
+        seen.add(v)
+        url = f"https://api.github.com/users/{v}"
+        try:
+            r = await client.get(url, headers={"Accept": "application/vnd.github+json"})
+        except httpx.HTTPError:
+            continue
+        if r.status_code != 200:
+            continue
+        try:
+            data = r.json()
+        except Exception:
+            continue
+        if data.get("type") == "Organization" and v not in d.github_orgs:
+            d.github_orgs.append(v)
+            return  # one good org is enough
+    return
 
 
 async def _probe_tlds(client: httpx.AsyncClient, name: str) -> list[str]:
@@ -207,6 +305,19 @@ def _parse_html(html: str, base_url: str, d: Discovery) -> None:
             d.status_page = href.split("?")[0].rstrip("/")
 
 
+async def _ct_subdomain_count(client: httpx.AsyncClient, domain: str) -> int:
+    """Try crt.sh first, fall back to certspotter (free, no auth, documented)."""
+    last_err: Exception | None = None
+    try:
+        return await _crtsh_count(client, domain)
+    except Exception as e:
+        last_err = e
+    try:
+        return await _certspotter_count(client, domain)
+    except Exception as e:
+        raise RuntimeError(f"crt.sh: {last_err}; certspotter: {e}")
+
+
 async def _crtsh_count(client: httpx.AsyncClient, domain: str) -> int:
     url = f"https://crt.sh/?q=%25.{domain}&output=json"
     try:
@@ -226,6 +337,31 @@ async def _crtsh_count(client: httpx.AsyncClient, domain: str) -> int:
             line = line.strip().lower().lstrip("*.")
             if line.endswith(domain):
                 names.add(line)
+    return len(names)
+
+
+async def _certspotter_count(client: httpx.AsyncClient, domain: str) -> int:
+    """https://sslmate.com/certspotter/api — free, no auth required for low volume."""
+    url = (
+        f"https://api.certspotter.com/v1/issuances?"
+        f"domain={domain}&include_subdomains=true&expand=dns_names"
+    )
+    try:
+        r = await client.get(url, timeout=20.0)
+    except httpx.HTTPError as e:
+        raise RuntimeError(str(e))
+    if r.status_code != 200:
+        raise RuntimeError(f"status {r.status_code}")
+    try:
+        data = r.json()
+    except Exception as e:
+        raise RuntimeError(f"json parse: {e}")
+    names: set[str] = set()
+    for entry in data:
+        for nm in entry.get("dns_names", []) or []:
+            n = nm.strip().lower().lstrip("*.")
+            if n.endswith(domain):
+                names.add(n)
     return len(names)
 
 
